@@ -1,0 +1,102 @@
+image: node:14
+
+variables:
+  NEXUS_URL: ${NEXUS_URL}
+  NEXUS_USERNAME: ${NEXUS_USERNAME}
+  NEXUS_PASSWORD: ${NEXUS_PASSWORD}
+  HARBOR_URL: ${HARBOR_URL}
+  HARBOR_USERNAME: ${HARBOR_USERNAME}
+  HARBOR_PASSWORD: ${HARBOR_PASSWORD}
+  DOCKER_IMAGE_NAME: ${CI_REGISTRY_IMAGE:-vue-example-login}
+  DOCKER_IMAGE_TAG: ${CI_COMMIT_REF_SLUG:-latest}
+
+stages:
+  - install
+  - lint
+  - build
+  - package
+  - deploy
+  - docker
+  - push
+
+cache:
+  paths:
+    - node_modules/
+
+install:
+  stage: install
+  script:
+    - npm install
+  artifacts:
+    paths:
+      - node_modules/
+
+lint:
+  stage: lint
+  script:
+    - npm run test
+  dependencies:
+    - install
+
+build:
+  stage: build
+  script:
+    - npm run build
+  artifacts:
+    paths:
+      - dist/
+  dependencies:
+    - install
+
+package:
+  stage: package
+  script:
+    - npm pack
+  artifacts:
+    paths:
+      - *.tgz
+  dependencies:
+    - build
+
+deploy:
+  stage: deploy
+  script:
+    # 使用 base64 编码密码
+    - echo "//${NEXUS_URL}/repository/npm-hosted/:_password=$(echo -n "${NEXUS_PASSWORD}" | base64)" > .npmrc
+    - echo "//${NEXUS_URL}/repository/npm-hosted/:username=${NEXUS_USERNAME}" >> .npmrc
+    - echo "//${NEXUS_URL}/repository/npm-hosted/:email=npm@example.com" >> .npmrc
+    - echo "registry=http://${NEXUS_URL}/repository/npm-hosted/" >> .npmrc
+    # 发布到 Nexus
+    - npm publish --registry=http://${NEXUS_URL}/repository/npm-hosted/
+  only:
+    - master
+  dependencies:
+    - package
+
+docker:
+  stage: docker
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - docker login -u ${HARBOR_USERNAME} -p ${HARBOR_PASSWORD} ${HARBOR_URL}
+  script:
+    - docker build -t ${HARBOR_URL}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG} .
+  only:
+    - master
+  dependencies:
+    - deploy
+
+push:
+  stage: push
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - docker login -u ${HARBOR_USERNAME} -p ${HARBOR_PASSWORD} ${HARBOR_URL}
+  script:
+    - docker push ${HARBOR_URL}/${DOCKER_IMAGE_NAME}:${DOCKER_IMAGE_TAG}
+  only:
+    - master
+  dependencies:
+    - docker 
