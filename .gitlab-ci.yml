@@ -1,0 +1,65 @@
+image: python:3.9
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+  TWINE_USERNAME: ${NEXUS_USERNAME}
+  TWINE_PASSWORD: ${NEXUS_PASSWORD}
+  TWINE_REPOSITORY_URL: ${NEXUS_URL}
+
+cache:
+  paths:
+    - .pip-cache/
+    - .venv/
+
+stages:
+  - build
+  - test
+  - package
+  - deploy
+
+before_script:
+  - python -V
+  - pip install --upgrade pip
+  - pip install virtualenv
+  - virtualenv .venv
+  - source .venv/bin/activate
+  - pip install -r py.requirements/dev.txt
+
+build:
+  stage: build
+  script:
+    - pip install build
+    - python -m build
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+
+test:
+  stage: test
+  script:
+    - pip install pytest
+    - pytest tests/
+
+package:
+  stage: package
+  script:
+    - pip install twine
+    - twine check dist/*
+  dependencies:
+    - build
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+
+deploy:
+  stage: deploy
+  script:
+    - pip install twine
+    - twine upload dist/*
+  dependencies:
+    - package
+  only:
+    - tags
+  when: manual 
