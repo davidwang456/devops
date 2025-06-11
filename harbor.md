@@ -673,17 +673,6 @@ type User struct {
 ```
 
 2. **数据获取实现**:
-
-```
-	sql := ` select a.* from (select pm.id as id, pm.project_id as project_id, ug.id as entity_id, ug.group_name as entity_name, ug.creation_time, ug.update_time, r.name as rolename,
-		r.role_id as role, pm.entity_type as entity_type from user_group ug join project_member pm
-		on pm.project_id = ? and ug.id = pm.entity_id join role r on pm.role = r.role_id where  pm.entity_type = 'g'
-		union
-		select pm.id as id, pm.project_id as project_id, u.user_id as entity_id, u.username as entity_name, u.creation_time, u.update_time, r.name as rolename,
-		r.role_id as role, pm.entity_type as entity_type from harbor_user u join project_member pm
-		on pm.project_id = ? and u.user_id = pm.entity_id
-		join role r on pm.role = r.role_id where pm.entity_type = 'u') as a where a.project_id = ? `
-```
 ```go
 // src/pkg/member/dao/dao.go
 func (d *dao) GetProjectMember(ctx context.Context, projectID int64, query *models.MemberQuery) ([]*models.Member, error) {
@@ -865,3 +854,428 @@ func (c *Cache) GetProjectMembers(projectID int64) ([]*models.Member, error) {
 - 缓存处理策略
 
 通过这些代码，可以清楚地了解 Harbor 项目成员管理功能的实现细节和架构设计。 
+
+### Harbor 项目权限控制实现
+
+Harbor 通过多层次的权限控制机制来管理用户对项目的访问权限。以下是详细的实现说明：
+
+1. **权限模型定义**:
+```go
+// src/common/rbac/types.go
+type Policy struct {
+    ID          int64  `json:"id"`
+    ProjectID   int64  `json:"project_id"`
+    Role        int    `json:"role"`
+    EntityType  string `json:"entity_type"`
+    EntityID    int    `json:"entity_id"`
+    EntityName  string `json:"entity_name"`
+    CreationTime time.Time `json:"creation_time"`
+    UpdateTime   time.Time `json:"update_time"`
+}
+
+// 角色定义
+const (
+    RoleProjectAdmin = 1
+    RoleDeveloper   = 2
+    RoleGuest       = 3
+    RoleMaintainer  = 4
+)
+```
+
+2. **权限检查实现**:
+```go
+// src/pkg/project/manager.go
+func (p *DefaultProjectManager) HasProjectPermission(ctx context.Context, projectID int64, userID int, action string) bool {
+    // 获取用户角色
+    role, err := p.GetUserProjectRole(ctx, projectID, userID)
+    if err != nil {
+        return false
+    }
+    
+    // 检查权限
+    switch action {
+    case "push":
+        return role == RoleProjectAdmin || role == RoleDeveloper || role == RoleMaintainer
+    case "pull":
+        return true // 所有角色都可以拉取
+    case "delete":
+        return role == RoleProjectAdmin
+    case "create":
+        return role == RoleProjectAdmin
+    default:
+        return false
+    }
+}
+
+// 获取用户在项目中的角色
+func (p *DefaultProjectManager) GetUserProjectRole(ctx context.Context, projectID int64, userID int) (int, error) {
+    // 检查直接项目成员身份
+    role, err := p.dao.GetUserProjectRole(ctx, projectID, userID)
+    if err == nil && role > 0 {
+        return role, nil
+    }
+    
+    // 检查用户组身份
+    return p.dao.GetUserGroupProjectRole(ctx, projectID, userID)
+}
+```
+
+3. **权限验证中间件**:
+```go
+// src/server/middleware/security/project.go
+func RequireProjectPermission(action string) func(ctx *beego.Context) {
+    return func(ctx *beego.Context) {
+        projectID := ctx.Input.Param(":id")
+        userID := ctx.Input.GetData("userId")
+        
+        // 检查用户权限
+        if !hasProjectPermission(userID, projectID, action) {
+            ctx.Output.SetStatus(http.StatusForbidden)
+            return
+        }
+    }
+}
+
+func hasProjectPermission(userID int, projectID int64, action string) bool {
+    // 获取项目管理器实例
+    projectMgr := project.GetDefaultProjectManager()
+    
+    // 检查权限
+    return projectMgr.HasProjectPermission(context.Background(), projectID, userID, action)
+}
+```
+
+4. **权限缓存实现**:
+```go
+// src/pkg/project/cache/cache.go
+type ProjectCache struct {
+    cache *cache.Cache
+}
+
+func (c *ProjectCache) GetUserProjectRole(userID int, projectID int64) (int, error) {
+    // 尝试从缓存获取
+    cacheKey := fmt.Sprintf("user_project_role_%d_%d", userID, projectID)
+    if role, ok := c.cache.Get(cacheKey); ok {
+        return role.(int), nil
+    }
+    
+    // 从数据库获取
+    role, err := c.dao.GetUserProjectRole(context.Background(), projectID, userID)
+    if err != nil {
+        return 0, err
+    }
+    
+    // 更新缓存
+    c.cache.Set(cacheKey, role, time.Hour)
+    return role, nil
+}
+```
+
+5. **API 权限控制**:
+```go
+// src/core/api/project.go
+func (p *ProjectAPI) PushImage(ctx *beego.Context) {
+    projectID := ctx.Input.Param(":id")
+    userID := ctx.Input.GetData("userId")
+    
+    // 检查推送权限
+    if !p.ProjectMgr.HasProjectPermission(ctx, projectID, userID, "push") {
+        ctx.Output.SetStatus(http.StatusForbidden)
+        return
+    }
+    
+    // 处理镜像推送
+    // ...
+}
+
+func (p *ProjectAPI) PullImage(ctx *beego.Context) {
+    projectID := ctx.Input.Param(":id")
+    userID := ctx.Input.GetData("userId")
+    
+    // 检查拉取权限
+    if !p.ProjectMgr.HasProjectPermission(ctx, projectID, userID, "pull") {
+        ctx.Output.SetStatus(http.StatusForbidden)
+        return
+    }
+    
+    // 处理镜像拉取
+    // ...
+}
+```
+
+6. **权限管理接口**:
+```go
+// src/core/api/project.go
+func (p *ProjectAPI) UpdateProjectMember(ctx *beego.Context) {
+    projectID := ctx.Input.Param(":id")
+    userID := ctx.Input.GetData("userId")
+    
+    // 只有项目管理员可以修改成员权限
+    if !p.ProjectMgr.HasProjectPermission(ctx, projectID, userID, "admin") {
+        ctx.Output.SetStatus(http.StatusForbidden)
+        return
+    }
+    
+    // 解析请求数据
+    var member models.Member
+    if err := ctx.Input.JSON(&member); err != nil {
+        ctx.Output.SetStatus(http.StatusBadRequest)
+        return
+    }
+    
+    // 更新成员权限
+    if err := p.ProjectMgr.UpdateProjectMember(ctx, projectID, &member); err != nil {
+        ctx.Output.SetStatus(http.StatusInternalServerError)
+        return
+    }
+    
+    ctx.Output.SetStatus(http.StatusOK)
+}
+```
+
+7. **权限检查工具函数**:
+```go
+// src/pkg/project/utils.go
+func CheckProjectPermission(ctx context.Context, projectID int64, userID int, action string) error {
+    projectMgr := project.GetDefaultProjectManager()
+    
+    // 检查用户是否存在
+    if !userMgr.UserExists(ctx, userID) {
+        return errors.New("user not found")
+    }
+    
+    // 检查项目是否存在
+    if !projectMgr.ProjectExists(ctx, projectID) {
+        return errors.New("project not found")
+    }
+    
+    // 检查权限
+    if !projectMgr.HasProjectPermission(ctx, projectID, userID, action) {
+        return errors.New("permission denied")
+    }
+    
+    return nil
+}
+```
+
+8. **权限变更审计**:
+```go
+// src/pkg/project/audit.go
+func (a *ProjectAudit) LogPermissionChange(ctx context.Context, projectID int64, userID int, action string, targetUserID int, oldRole int, newRole int) error {
+    auditLog := &models.AuditLog{
+        ProjectID:    projectID,
+        UserID:       userID,
+        Action:       action,
+        TargetUserID: targetUserID,
+        OldRole:      oldRole,
+        NewRole:      newRole,
+        CreateTime:   time.Now(),
+    }
+    
+    return a.dao.CreateAuditLog(ctx, auditLog)
+}
+```
+
+这些代码展示了 Harbor 项目权限控制的核心实现，包括：
+- 权限模型定义
+- 权限检查机制
+- 权限验证中间件
+- 权限缓存处理
+- API 权限控制
+- 权限管理接口
+- 权限检查工具
+- 权限变更审计
+
+通过这些实现，Harbor 提供了细粒度的项目权限控制，确保用户只能执行其权限范围内的操作。权限控制贯穿于整个系统，从 API 接口到具体的业务操作，都有相应的权限检查机制。 
+
+### Harbor Registry 数据库表结构说明
+
+Harbor Registry 使用 PostgreSQL 数据库存储数据，以下是主要表的结构说明：
+
+1. **用户相关表**:
+```sql
+-- harbor_user 表：存储用户基本信息
+CREATE TABLE harbor_user (
+    user_id SERIAL PRIMARY KEY,           -- 用户ID，自增主键
+    username VARCHAR(255) NOT NULL,       -- 用户名
+    email VARCHAR(255),                   -- 邮箱
+    password VARCHAR(40),                 -- 密码（加密存储）
+    realname VARCHAR(255),               -- 真实姓名
+    comment VARCHAR(255),                -- 备注
+    deleted BOOLEAN DEFAULT FALSE,       -- 是否删除
+    reset_uuid VARCHAR(40),              -- 重置密码UUID
+    salt VARCHAR(40),                    -- 密码盐值
+    sysadmin_flag BOOLEAN DEFAULT FALSE, -- 是否系统管理员
+    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- 创建时间
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- 更新时间
+    UNIQUE (username)
+);
+
+-- user_group 表：存储用户组信息
+CREATE TABLE user_group (
+    id SERIAL PRIMARY KEY,               -- 用户组ID
+    group_name VARCHAR(255) NOT NULL,    -- 用户组名称
+    group_type INTEGER DEFAULT 0,        -- 用户组类型
+    ldap_group_dn VARCHAR(512),          -- LDAP组DN
+    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- 创建时间
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- 更新时间
+    UNIQUE (group_name)
+);
+```
+
+2. **项目相关表**:
+```sql
+-- project 表：存储项目信息
+CREATE TABLE project (
+    project_id SERIAL PRIMARY KEY,       -- 项目ID
+    name VARCHAR(255) NOT NULL,          -- 项目名称
+    owner_id INTEGER NOT NULL,           -- 所有者ID
+    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- 创建时间
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- 更新时间
+    deleted BOOLEAN DEFAULT FALSE,       -- 是否删除
+    owner_name VARCHAR(255),             -- 所有者名称
+    UNIQUE (name)
+);
+
+-- project_member 表：存储项目成员信息
+CREATE TABLE project_member (
+    id SERIAL PRIMARY KEY,               -- 成员ID
+    project_id INTEGER NOT NULL,         -- 项目ID
+    entity_id INTEGER NOT NULL,          -- 实体ID（用户ID或组ID）
+    entity_type VARCHAR(1) NOT NULL,     -- 实体类型（u:用户, g:组）
+    role INTEGER NOT NULL,               -- 角色ID
+    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- 创建时间
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- 更新时间
+    FOREIGN KEY (project_id) REFERENCES project(project_id),
+    FOREIGN KEY (role) REFERENCES role(role_id)
+);
+```
+
+3. **镜像相关表**:
+```sql
+-- repository 表：存储镜像仓库信息
+CREATE TABLE repository (
+    repository_id SERIAL PRIMARY KEY,    -- 仓库ID
+    name VARCHAR(255) NOT NULL,          -- 仓库名称
+    project_id INTEGER NOT NULL,         -- 所属项目ID
+    description TEXT,                    -- 描述
+    pull_count INTEGER DEFAULT 0,        -- 拉取次数
+    star_count INTEGER DEFAULT 0,        -- 星标数
+    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- 创建时间
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- 更新时间
+    FOREIGN KEY (project_id) REFERENCES project(project_id)
+);
+
+-- artifact 表：存储镜像标签信息
+CREATE TABLE artifact (
+    id SERIAL PRIMARY KEY,               -- 标签ID
+    repository_id INTEGER NOT NULL,      -- 仓库ID
+    digest VARCHAR(255) NOT NULL,        -- 镜像摘要
+    tag VARCHAR(255) NOT NULL,           -- 标签名
+    size BIGINT NOT NULL,                -- 大小
+    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- 创建时间
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- 更新时间
+    FOREIGN KEY (repository_id) REFERENCES repository(repository_id)
+);
+```
+
+4. **权限相关表**:
+```sql
+-- role 表：存储角色信息
+CREATE TABLE role (
+    role_id SERIAL PRIMARY KEY,          -- 角色ID
+    name VARCHAR(20) NOT NULL,           -- 角色名称
+    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- 创建时间
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP     -- 更新时间
+);
+
+-- policy 表：存储权限策略
+CREATE TABLE policy (
+    id SERIAL PRIMARY KEY,               -- 策略ID
+    project_id INTEGER NOT NULL,         -- 项目ID
+    role INTEGER NOT NULL,               -- 角色ID
+    entity_type VARCHAR(1) NOT NULL,     -- 实体类型
+    entity_id INTEGER NOT NULL,          -- 实体ID
+    entity_name VARCHAR(255) NOT NULL,   -- 实体名称
+    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- 创建时间
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- 更新时间
+    FOREIGN KEY (project_id) REFERENCES project(project_id),
+    FOREIGN KEY (role) REFERENCES role(role_id)
+);
+```
+
+5. **审计相关表**:
+```sql
+-- audit_log 表：存储审计日志
+CREATE TABLE audit_log (
+    id SERIAL PRIMARY KEY,               -- 日志ID
+    project_id INTEGER,                  -- 项目ID
+    user_id INTEGER,                     -- 用户ID
+    action VARCHAR(255) NOT NULL,        -- 操作类型
+    target_user_id INTEGER,              -- 目标用户ID
+    old_role INTEGER,                    -- 旧角色
+    new_role INTEGER,                    -- 新角色
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- 创建时间
+    FOREIGN KEY (project_id) REFERENCES project(project_id)
+);
+```
+
+6. **配置相关表**:
+```sql
+-- properties 表：存储系统配置
+CREATE TABLE properties (
+    id SERIAL PRIMARY KEY,               -- 配置ID
+    k VARCHAR(64) NOT NULL,              -- 配置键
+    v VARCHAR(128) NOT NULL,             -- 配置值
+    UNIQUE (k)
+);
+```
+
+7. **扫描相关表**:
+```sql
+-- scan_report 表：存储扫描报告
+CREATE TABLE scan_report (
+    id SERIAL PRIMARY KEY,               -- 报告ID
+    artifact_id INTEGER NOT NULL,        -- 镜像ID
+    report JSONB NOT NULL,               -- 扫描报告内容
+    creation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- 创建时间
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,    -- 更新时间
+    FOREIGN KEY (artifact_id) REFERENCES artifact(id)
+);
+```
+
+8. **标签相关表**:
+```sql
+-- tag 表：存储标签信息
+CREATE TABLE tag (
+    id SERIAL PRIMARY KEY,               -- 标签ID
+    repository_id INTEGER NOT NULL,      -- 仓库ID
+    name VARCHAR(255) NOT NULL,          -- 标签名
+    push_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,      -- 推送时间
+    pull_time TIMESTAMP,                 -- 拉取时间
+    FOREIGN KEY (repository_id) REFERENCES repository(repository_id)
+);
+```
+
+主要表关系说明：
+1. 用户-项目关系：通过 `project_member` 表关联
+2. 项目-仓库关系：通过 `repository` 表的 `project_id` 关联
+3. 仓库-镜像关系：通过 `artifact` 表的 `repository_id` 关联
+4. 权限-角色关系：通过 `policy` 表的 `role` 关联
+5. 用户组-用户关系：通过 `user_group` 表管理
+
+索引说明：
+1. 用户表：`username` 唯一索引
+2. 项目表：`name` 唯一索引
+3. 仓库表：`name` 和 `project_id` 联合索引
+4. 镜像表：`digest` 和 `repository_id` 联合索引
+5. 标签表：`name` 和 `repository_id` 联合索引
+
+这些表结构支持 Harbor 的核心功能，包括：
+- 用户认证和授权
+- 项目管理
+- 镜像存储和管理
+- 权限控制
+- 审计日志
+- 系统配置
+- 安全扫描
