@@ -673,6 +673,17 @@ type User struct {
 ```
 
 2. **数据获取实现**:
+
+```
+	sql := ` select a.* from (select pm.id as id, pm.project_id as project_id, ug.id as entity_id, ug.group_name as entity_name, ug.creation_time, ug.update_time, r.name as rolename,
+		r.role_id as role, pm.entity_type as entity_type from user_group ug join project_member pm
+		on pm.project_id = ? and ug.id = pm.entity_id join role r on pm.role = r.role_id where  pm.entity_type = 'g'
+		union
+		select pm.id as id, pm.project_id as project_id, u.user_id as entity_id, u.username as entity_name, u.creation_time, u.update_time, r.name as rolename,
+		r.role_id as role, pm.entity_type as entity_type from harbor_user u join project_member pm
+		on pm.project_id = ? and u.user_id = pm.entity_id
+		join role r on pm.role = r.role_id where pm.entity_type = 'u') as a where a.project_id = ? `
+```
 ```go
 // src/pkg/member/dao/dao.go
 func (d *dao) GetProjectMember(ctx context.Context, projectID int64, query *models.MemberQuery) ([]*models.Member, error) {
