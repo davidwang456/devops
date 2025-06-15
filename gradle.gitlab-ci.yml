@@ -1,0 +1,53 @@
+image: gradle:8.5-jdk18
+
+variables:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  MAVEN_USERNAME: ${MAVEN_USERNAME}
+  MAVEN_PASSWORD: ${MAVEN_PASSWORD}
+
+stages:
+  - build
+  - test
+  - package
+  - deploy
+
+cache:
+  paths:
+    - .gradle/
+    - build/
+
+build:
+  stage: build
+  script:
+    - ./gradlew build -x test
+  artifacts:
+    paths:
+      - build/libs/
+    expire_in: 1 week
+
+test:
+  stage: test
+  script:
+    - ./gradlew test jacocoTestReport
+  artifacts:
+    paths:
+      - build/reports/tests/
+      - build/reports/jacoco/
+    expire_in: 1 week
+
+package:
+  stage: package
+  script:
+    - ./gradlew assemble
+  artifacts:
+    paths:
+      - build/libs/*.jar
+    expire_in: 1 week
+
+deploy:
+  stage: deploy
+  script:
+    - echo "在这里添加部署脚本，例如上传到制品库或部署到服务器"
+  only:
+    - main
+  when: manual 
