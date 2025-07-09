@@ -1,0 +1,17 @@
+# 使用 UBI OpenJDK 17 作为基础镜像
+FROM registry.access.redhat.com/ubi8/openjdk-17:latest
+
+# 设置工作目录
+WORKDIR /opt
+
+# 复制 JAR 文件到容器中
+COPY app.jar /opt/app.jar
+
+# 暴露端口 80
+EXPOSE 80
+
+# 设置 Java 内存参数
+ENV JAVA_OPTS="-Xmx256m -Xms128m -XX:+UseG1GC"
+
+# 设置入口命令为启动应用程序
+ENTRYPOINT ["java", "-jar", "/opt/app.jar"] 
