@@ -4,3 +4,4 @@ gitlab支持的CICD LANGUAGE :https://gitlab.com/gitlab-org/gitlab/-/tree/master
 find . -type d -name src | grep -v target | tr '\n' ',' | sed 's/,$//'
 
 find . -type d -name src | grep -v target | sed 's#/src$##' | tr '\n' ',' | sed 's/,$//'
+find . -type d -name src | grep -v target | awk '{sub("/src$", ""); print}' | tr '\n' ',' | sed 's/,$//'
