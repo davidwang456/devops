@@ -2,3 +2,5 @@ gitlab支持的CICD LANGUAGE :https://gitlab.com/gitlab-org/gitlab/-/tree/master
 
 查找src目录，并以,分隔
 find . -type d -name src | grep -v target | tr '\n' ',' | sed 's/,$//'
+
+find . -type d -name src | grep -v target | sed 's#/src$##' | tr '\n' ',' | sed 's/,$//'
